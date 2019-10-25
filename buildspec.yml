@@ -1,0 +1,21 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - yum install -y maven
+    runtime-versions:
+      java: corretto8
+  build:
+    commands:
+      - mvn package
+      - aws cloudformation package --template-file sam.yml --s3-bucket $BUILD_OUTPUT_BUCKET --output-template-file packaged.yml
+
+artifacts:
+  files:
+    - sam.yml
+    - packaged.yml
+
+cache:
+  paths:
+    - '/root/.m2/**/*'
