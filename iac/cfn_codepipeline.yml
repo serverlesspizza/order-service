@@ -1,0 +1,342 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Serverless Pizza CodePipeline for Order Service
+
+Parameters:
+  ModuleName:
+    Description: The name of the module to create the pipeline for
+    Type: String
+    Default: order-service
+  GitHubToken:
+    Description: The GitHub Personal Access Token to use
+    Type: String
+
+Resources:
+  CloudFormationPipelineRole:
+    Description: Creating service role in IAM for AWS CloudFormation
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudformation.amazonaws.com
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonRoute53FullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AWSLambdaExecute
+        - arn:aws:iam::aws:policy/CloudFrontFullAccess
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - apigateway:*
+                  - codedeploy:*
+                  - lambda:*
+                  - dynamodb:*
+                  - cloudformation:CreateChangeSet
+                  - iam:GetRole
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:PutRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PassRole
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                Effect: Allow
+                Resource: '*'
+          PolicyName: CloudFormationPipelineRolePolicy
+      RoleName: !Join
+        - '-'
+        - - 'serverlesspizza'
+          - !Ref ModuleName
+          - 'cloudformation-role'
+    Type: AWS::IAM::Role
+
+  CodeBuildRole:
+    Description: Creating service role in IAM for CodeBuild
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+      Path: /
+      Policies:
+        - PolicyName: "CodeBuildNestedCFNAccessPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "logs:CreateLogStream"
+                  - "logs:CreateLogGroup"
+                  - "logs:PutLogEvents"
+                Resource: '*'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      RoleName: !Join
+        - '-'
+        - - 'serverlesspizza'
+          - !Ref ModuleName
+          - 'codebuild-role'
+    Type: AWS::IAM::Role
+
+  CodePipelineRole:
+    Description: Creating role in IAM for CodePipeline
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join
+        - '-'
+        - - 'serverlesspizza'
+          - !Ref ModuleName
+          - 'codepipeline-role'
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+      Path: /
+      Policies:
+        - PolicyName: "CodePipelineNestedCFNAccessPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "cloudformation:DescribeStacks"
+                  - "cloudformation:DescribeChangeSet"
+                  - "cloudformation:CreateChangeSet"
+                  - "cloudformation:ExecuteChangeSet"
+                  - "cloudformation:DeleteChangeSet"
+                  - "codebuild:StartBuild"
+                  - "codebuild:BatchGetBuilds"
+                  - "codecommit:GetBranch"
+                  - "codecommit:GetCommit"
+                  - "codecommit:UploadArchive"
+                  - "codecommit:GetUploadArchiveStatus"
+                  - "iam:PassRole"
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - "s3:PutObject"
+                  - "s3:GetObject"
+                  - "s3:GetObjectVersion"
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref 'ArtifactBucket'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref 'ArtifactBucket'
+                      - /*
+
+  CodeBuildProject:
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Description: !Join
+        - ''
+        - - 'CodeBuild Project for '
+          - !Ref 'ModuleName'
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:2.0
+        Type: LINUX_CONTAINER
+      Name: !Join
+        - '-'
+        - - 'serverlesspizza'
+          - !Ref ModuleName
+          - 'codebuild-project'
+      ServiceRole: !Ref 'CodeBuildRole'
+      Source:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 5
+    Type: AWS::CodeBuild::Project
+
+  CodePipeline:
+    DependsOn:
+      - CodeBuildProject
+    Properties:
+      Name: !Join
+        - '-'
+        - - 'serverlesspizza'
+          - !Ref 'ModuleName'
+          - 'pipeline'
+      RoleArn:
+        Fn::GetAtt: [CodePipelineRole, Arn]
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        -
+          Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              OutputArtifacts:
+                - Name: SourceArtifact
+              Configuration:
+                Owner: serverlesspizza
+                Repo: !Ref ModuleName
+                Branch: master
+                OAuthToken: !Ref GitHubToken
+              RunOrder: 1
+        -
+          Name: Build
+          Actions:
+            - Name: Build
+              InputArtifacts:
+                - Name: SourceArtifact
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              OutputArtifacts:
+                - Name: BuildArtifact
+              RunOrder: 1
+        -
+          Name: Deploy-dev
+          Actions:
+            - Name: BuildChangeSet
+              InputArtifacts:
+                - Name: BuildArtifact
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                StackName: !Join
+                  - '-'
+                  - - 'serverlesspizza'
+                    - !Ref ModuleName
+                    - 'stack-dev'
+                ChangeSetName: !Join
+                  - '-'
+                  - - 'serverlesspizza'
+                    - !Ref ModuleName
+                    - 'changeset-dev'
+                Capabilities: CAPABILITY_NAMED_IAM
+                TemplatePath: BuildArtifact::outputtemplate.yml
+                RoleArn: !GetAtt CloudFormationPipelineRole.Arn
+                ParameterOverrides: '{"Environment": "dev"}'
+              RunOrder: 1
+            - Name: ExecuteChangeSet
+              InputArtifacts:
+                - Name: BuildArtifact
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              Configuration:
+                ActionMode: CHANGE_SET_EXECUTE
+                RoleArn: !GetAtt CloudFormationPipelineRole.Arn
+                StackName: !Join
+                  - '-'
+                  - - 'serverlesspizza'
+                    - !Ref ModuleName
+                    - 'stack-dev'
+                ChangeSetName: !Join
+                  - '-'
+                  - - 'serverlesspizza'
+                    - !Ref ModuleName
+                    - 'changeset-dev'
+              RunOrder: 2
+        -
+          Name: Approve-prod-deployment
+          Actions:
+            - Name: ApprovalRequired
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Version: 1
+                Provider: Manual
+              RunOrder: 1
+        -
+          Name: Deploy-prod
+          Actions:
+            - Name: BuildChangeSet
+              InputArtifacts:
+                - Name: BuildArtifact
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                StackName: !Join
+                  - '-'
+                  - - 'serverlesspizza'
+                    - !Ref ModuleName
+                    - 'stack-prod'
+                ChangeSetName: !Join
+                  - '-'
+                  - - 'serverlesspizza'
+                    - !Ref ModuleName
+                    - 'changeset-prod'
+                Capabilities: CAPABILITY_NAMED_IAM
+                TemplatePath: BuildArtifact::outputtemplate.yml
+                RoleArn: !GetAtt CloudFormationPipelineRole.Arn
+                ParameterOverrides: '{"Environment": "prod"}'
+              RunOrder: 1
+            - Name: ExecuteChangeSet
+              InputArtifacts:
+                - Name: BuildArtifact
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              Configuration:
+                ActionMode: CHANGE_SET_EXECUTE
+                RoleArn: !GetAtt CloudFormationPipelineRole.Arn
+                StackName: !Join
+                  - '-'
+                  - - 'serverlesspizza'
+                    - !Ref ModuleName
+                    - 'stack-prod'
+                ChangeSetName: !Join
+                  - '-'
+                  - - 'serverlesspizza'
+                    - !Ref ModuleName
+                    - 'changeset-prod'
+              RunOrder: 2
+    Type: AWS::CodePipeline::Pipeline
+
+  ArtifactBucket:
+    DeletionPolicy: Delete
+    Description: Creating Amazon S3 bucket for CodePipeline artifacts
+    Properties:
+      BucketName: !Join
+        - '-'
+        - - 'serverlesspizza'
+          - !Ref ModuleName
+          - 'artifact-bucket'
+      LifecycleConfiguration:
+        Rules:
+          - ExpirationInDays: 1
+            Status: Enabled
+      PublicAccessBlockConfiguration:
+        RestrictPublicBuckets: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        BlockPublicAcls: true
+    Type: AWS::S3::Bucket

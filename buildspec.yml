@@ -1,0 +1,27 @@
+version: 0.2
+env:
+  variables:
+    JAVA_HOME: "/usr/lib/jvm/java-8-openjdk-amd64"
+
+phases:
+  install:
+    commands:
+      - apt-get update -y
+      - apt-get install -y maven
+    runtime-versions:
+      java: openjdk8
+  build:
+    commands:
+      - export BUCKET=serverlesspizza-order-service-artifact-bucket
+      - mvn package
+      - aws cloudformation package --template-file sam.yml --s3-bucket $BUCKET --output-template-file outputtemplate.yml
+
+artifacts:
+  type: zip
+  files:
+    - sam.yml
+    - outputtemplate.yml
+
+cache:
+  paths:
+    - '/root/.m2/**/*'
